@@ -28,4 +28,5 @@ dependencies = [
     "tavily-python>=0.7.24",
     "onnxruntime>=1.20,<1.26",
     "langchain-google-genai>=4.2.5",
+    "watchdog>=6.0.0",
 ]

@@ -108,26 +108,77 @@ def create_session() -> str:
     st.session_state.turns[sid] = 0
     return sid
 
-
 def load_session_chats(session_id: str) -> list[dict]:
     config = {"configurable": {"thread_id": session_id}}
     try:
         state = graph.get_state(config)
         if not state or not state.values:
             return []
+
+        # Walk checkpoint history to find the state snapshot right after
+        # generate_answer_node ran for each turn (chronological order).
+        history = list(graph.get_state_history(config))
+        history.reverse()  # get_state_history returns newest-first
+        turn_snapshots = [
+            _serialize_state(snap.values)
+            for snap in history
+            if "generate_answer" in (snap.metadata or {}).get("writes", {})
+        ]
+
         chats = []
         turn = 0
+        pending_ai_content = None
+
+        def flush_pending():
+            nonlocal turn, pending_ai_content
+            if pending_ai_content is not None:
+                turn += 1
+                snapshot = turn_snapshots[turn - 1] if turn - 1 < len(turn_snapshots) else {}
+                chats.append({
+                    "role": "assistant",
+                    "content": pending_ai_content,
+                    "turn": turn,
+                    "graph_state": snapshot,
+                })
+                pending_ai_content = None
+
         for msg in state.values.get("messages", []):
             type_name = type(msg).__name__
             content = msg.content if isinstance(msg.content, str) else str(msg.content)
+
             if type_name == "HumanMessage":
+                flush_pending()  # finalize the previous turn's answer, if any
                 chats.append({"role": "user", "content": content})
-            elif type_name in ("AIMessage", "AIMessageChunk"):
-                turn += 1
-                chats.append({"role": "assistant", "content": content, "turn": turn, "graph_state": {}})
+            elif type_name in ("AIMessage", "AIMessageChunk") and content.strip():
+                # Keep overwriting — the LAST one before the next HumanMessage
+                # is always generate_answer_node's real final answer.
+                pending_ai_content = content
+
+        flush_pending()  # flush the last turn's answer
         return chats
     except Exception:
         return []
+
+
+# def load_session_chats(session_id: str) -> list[dict]:
+#     config = {"configurable": {"thread_id": session_id}}
+#     try:
+#         state = graph.get_state(config)
+#         if not state or not state.values:
+#             return []
+#         chats = []
+#         turn = 0
+#         for msg in state.values.get("messages", []):
+#             type_name = type(msg).__name__
+#             content = msg.content if isinstance(msg.content, str) else str(msg.content)
+#             if type_name == "HumanMessage":
+#                 chats.append({"role": "user", "content": content})
+#             elif type_name in ("AIMessage", "AIMessageChunk"):
+#                 turn += 1
+#                 chats.append({"role": "assistant", "content": content, "turn": turn, "graph_state": {}})
+#         return chats
+#     except Exception:
+#         return []
 
 
 def switch_session(session_id: str) -> None:
@@ -401,7 +452,15 @@ if prompt := st.chat_input("Ask about your papers, verify a claim, or search the
             except Exception as e:
                 error_occurred = True
                 response_text = "⚠️ Something went wrong while processing your request. Please try again."
-                placeholder.error(response_text)
+                # placeholder.error(response_text)
+                placeholder.markdown(
+                    f'<div style="color:#d33; padding:0.75rem 1rem; background:#fdecea; '
+                    f'border-radius:8px; display:flex; align-items:center; gap:6px;">'
+                    f"{response_text} "
+                    f'<span title="{e.message}" style="cursor: help; font-size: 1rem;">ℹ️</span>'
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
                 with st.expander("Technical details (for debugging)"):
                     st.exception(e)
 
